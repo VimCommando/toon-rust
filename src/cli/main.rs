@@ -85,6 +85,7 @@ struct Cli {
     stats: bool,
 
     #[arg(
+        short,
         long,
         help = "Fall back to unchanged input instead of failing when encode input is not JSON"
     )]
