@@ -84,6 +84,12 @@ struct Cli {
     #[arg(long, help = "Show token count and savings")]
     stats: bool,
 
+    #[arg(
+        long,
+        help = "Fall back to unchanged input instead of failing when encode input is not JSON"
+    )]
+    silent: bool,
+
     #[arg(long, value_parser = parse_delimiter, help = "Delimiter: comma, tab, or pipe")]
     delimiter: Option<Delimiter>,
 
@@ -200,11 +206,23 @@ fn write_output(output_path: Option<PathBuf>, content: &str) -> Result<()> {
 
 fn run_encode(cli: &Cli, input: &str) -> Result<()> {
     if input.trim().is_empty() {
+        if cli.silent {
+            write_output(cli.output.clone(), input)?;
+            return Ok(());
+        }
         bail!("Input is empty. Provide JSON data via file or stdin");
     }
 
-    let json_value: serde_json::Value =
-        serde_json::from_str(input).context("Failed to parse input as JSON")?;
+    let json_value: serde_json::Value = match serde_json::from_str(input) {
+        Ok(value) => value,
+        Err(err) => {
+            if cli.silent {
+                write_output(cli.output.clone(), input)?;
+                return Ok(());
+            }
+            return Err(err).context("Failed to parse input as JSON");
+        }
+    };
 
     let mut opts = EncodeOptions::new();
     if let Some(d) = cli.delimiter {
@@ -396,6 +414,9 @@ fn validate_flags(cli: &Cli, operation: &Operation) -> Result<()> {
             }
         }
         Operation::Decode => {
+            if cli.silent {
+                bail!("--silent is only valid for encode mode");
+            }
             if cli.delimiter.is_some() {
                 bail!("--delimiter is only valid for encode mode");
             }
@@ -473,4 +494,77 @@ fn main() -> Result<()> {
 fn run_interactive() -> Result<()> {
     toon_format::tui::run().context("Failed to run interactive TUI")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli_with_output(output: PathBuf, silent: bool) -> Cli {
+        Cli {
+            input: None,
+            interactive: false,
+            output: Some(output),
+            encode: false,
+            decode: false,
+            stats: false,
+            silent,
+            delimiter: None,
+            indent: None,
+            no_strict: false,
+            no_coerce: false,
+            json_indent: None,
+            fold_keys: false,
+            flatten_depth: None,
+            expand_paths: false,
+        }
+    }
+
+    fn temp_output_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+
+        std::env::temp_dir().join(format!(
+            "toon-rust-{name}-{}-{}.out",
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    #[test]
+    fn silent_encode_falls_back_to_unmodified_invalid_json() {
+        let output = temp_output_path("silent-invalid-json");
+        let cli = cli_with_output(output.clone(), true);
+        let input = "{\"unfinished\":";
+
+        run_encode(&cli, input).unwrap();
+
+        let actual = fs::read_to_string(&output).unwrap();
+        fs::remove_file(&output).unwrap();
+        assert_eq!(actual, input);
+    }
+
+    #[test]
+    fn silent_encode_accepts_empty_input() {
+        let output = temp_output_path("silent-empty");
+        let cli = cli_with_output(output.clone(), true);
+
+        run_encode(&cli, "").unwrap();
+
+        let actual = fs::read_to_string(&output).unwrap();
+        fs::remove_file(&output).unwrap();
+        assert_eq!(actual, "");
+    }
+
+    #[test]
+    fn encode_still_errors_on_invalid_json_without_silent() {
+        let output = temp_output_path("invalid-json");
+        let cli = cli_with_output(output, false);
+
+        let err = run_encode(&cli, "{\"unfinished\":").unwrap_err();
+
+        assert!(err.to_string().contains("Failed to parse input as JSON"));
+    }
 }
